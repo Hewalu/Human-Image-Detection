@@ -7,6 +7,7 @@ from ultralytics import YOLO
 RED_DURATION = 40
 GREEN_DURATION = 15
 DEBOUNCE_TIME = 0.25  # Reduziert auf 0.25 Sekunden
+PERSON_REDUCE_DURATION = 10
 
 
 class TrafficLight:
@@ -20,8 +21,8 @@ class TrafficLight:
         elapsed = now - self.start_time
 
         if self.state == "RED":
-            # Dynamische Dauer: 40s minus 10s pro Person
-            effective_duration = max(0, RED_DURATION - (person_count * 10))
+            # Dynamische Dauer
+            effective_duration = max(0, RED_DURATION - (person_count * PERSON_REDUCE_DURATION))
 
             if elapsed >= effective_duration:
                 # Wechsel zu Grün
