@@ -4,40 +4,49 @@ from pygame import gfxdraw
 import math
 import sys
 import os
+try:
+    from esp_control import ESPController
+except ImportError:
+    # Falls das hier als Modul geladen wird oder der Pfad anders ist
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from esp_control import ESPController
+
+try:
+    from traffic_logic import TrafficLightLogic
+except ImportError:
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from traffic_logic import TrafficLightLogic
 
 # ==========================================
 #      KONFIGURATION
 # ==========================================
 
+ESP_PORT = "COM3" # Bitte anpassen falls notwendig (Geräte-Manager)
 SCALE_FACTOR = 0.3   
 
 # 1. PERSONEN LOGIK
 MAX_PERSON_CAP = 15      
 MAX_VISUAL_PERSONS = 8   
-ADD_LEDS_PER_PERSON = 2  
+BONUS_TIME_PER_PERSON_MS = 600  # Bonuszeit pro Person für Grünphase
 
-# 2. LED ANZAHL
-BASE_LEDS_GREEN = 12     
-TOTAL_LEDS_RED   = 34    
-MAX_LEDS_LIMIT = 34      
+# 2. LED VISUALISIERUNG
+VISUAL_LED_COUNT = 20    # Feste Anzahl an Punkten
+BONUS_LEDS_COUNT = 3     # Visuelle Überlauf-Punkte
 
-# 3. BONUS PUNKTE (Nicht mehr relevant für neue Logik, aber drin gelassen)
-BONUS_LEDS_COUNT = 3     
-
-# 4. GESCHWINDIGKEIT
-SECONDS_PER_LED_GREEN = 1.0  
-SECONDS_PER_LED_RED   = 0.3  
+# 3. BASIS ZEITEN (Millisekunden)
+# Diese steuern wie lange der Ring braucht um voll zu werden
+DURATION_RED_BASE_MS = 20000   # Basisdauer Rot
+DURATION_GREEN_BASE_MS = 12000 # Basisdauer Grün
 
 # 5. OPTIK
 TIMER_FONT_SIZE = 280     
 ORIGINAL_LED_RADIUS = 235  
 ORIGINAL_DOT_SIZE   = 20
 WAITING_ICON_SCALE = 0.22 
-SNAIL_ICON_SCALE = 0.07 # Skalierung für die Schnecke
 
 # 6. LOGIK
 CLEARANCE_TIME_MS = 4000 
-TIME_FACTOR_SLOW = 0.7   # Faktor für langsameres Ablaufen
+TIME_FACTOR_SLOW = 0.7   
 CROWD_BONUS_FACTOR = 0.2 
 
 # 7. POSITIONIERUNG
@@ -55,9 +64,6 @@ COLOR_WALKER = (255, 255, 255)
 # ==========================================
 # SYSTEM CODE
 # ==========================================
-
-MS_PER_LED_GREEN = int(SECONDS_PER_LED_GREEN * 1000)
-MS_PER_LED_RED   = int(SECONDS_PER_LED_RED * 1000)
 
 WIDTH, HEIGHT = 0, 0 
 CENTER_X, CENTER_Y = 0, 0
@@ -78,7 +84,7 @@ def debug_log(message):
 def load_and_scale_image(path, scale=SCALE_FACTOR):
     try:
         if not os.path.exists(path):
-            if "tram" in path or "waiting" in path or "snail" in path: return None 
+            if "tram" in path or "waiting" in path: return None 
             else: raise FileNotFoundError(f"Datei fehlt: {path}")
 
         img = pygame.image.load(path).convert_alpha()
@@ -105,9 +111,6 @@ def load_images():
     images['green_off'] = load_and_scale_image(os.path.join(asset_dir, 'mann_gruen_aus.png'))
     images['tram'] = load_and_scale_image(os.path.join(asset_dir, 'tram.png')) 
     
-    # Lade Snail Bild
-    images['snail'] = load_and_scale_image(os.path.join(asset_dir, 'snail.png'), scale=SNAIL_ICON_SCALE)
-
     for i in range(1, MAX_VISUAL_PERSONS + 1):
         filename = f"waiting_{i}.png"
         full_path = os.path.join(asset_dir, filename)
@@ -144,15 +147,6 @@ def draw_crowd_image(screen, person_count):
             text = str(person_count)
             game_font.render_to(screen, (CENTER_X-10, CENTER_Y+OFFSET_RING_Y-10), text, (255, 255, 255))
 
-def draw_snail(screen, alpha):
-    snail_img = images.get('snail')
-    if snail_img:
-        # Erstelle eine Kopie des Bildes, um Alpha zu setzen, ohne das Original zu ändern
-        temp_snail = snail_img.copy()
-        temp_snail.set_alpha(alpha)
-        rect = temp_snail.get_rect(center=(CENTER_X, CENTER_Y + OFFSET_RING_Y))
-        screen.blit(temp_snail, rect)
-
 def draw_countdown_timer(screen, remaining_ms):
     seconds = math.ceil(remaining_ms / 1000)
     if seconds < 1: seconds = 1 
@@ -167,9 +161,6 @@ def draw_led_ring(screen, active_leds, total_leds, state, breathing_alpha=255, i
     
     # Basisgröße
     current_dot_size = DOT_SIZE_BASE
-    if total_leds > 60:
-        factor = 60 / total_leds
-        current_dot_size = max(2, int(DOT_SIZE_BASE * factor))
     
     # ATEM-GRÖSSE (weich berechnet)
     pulsing_size = current_dot_size
@@ -188,59 +179,49 @@ def draw_led_ring(screen, active_leds, total_leds, state, breathing_alpha=255, i
         y_int = int(ring_center_y + LED_RADIUS * math.sin(angle))
         
         is_lit = False
-        current_color = COLOR_LED_OFF
-
+        is_bonus = False 
+        
         # LOGIK FÜR GRÜN PHASE
         if state == STATE_GREEN:
-            # Reguläre LEDs (Die Schlange)
-            leds_gone = total_leds - active_leds
-            if i >= leds_gone: 
-                is_lit = True
-                current_color = COLOR_LED_ON
-            
-        # LOGIK FÜR ROT / TRAM
-        elif state == STATE_RED or state == STATE_TRAM:
+            # actvie_leds zeigt hier an wie viele NOCH leuchten sollen (Countdown)
             if i < active_leds: 
                 is_lit = True
-                current_color = COLOR_LED_ON
+            
+            # Bonus-Punkte Visualisierung (die ersten paar Punkte sind Bonus)
+            if is_slow_mode:
+                 if i < BONUS_LEDS_COUNT:
+                    is_bonus = True
+
+        # LOGIK FÜR ROT / TRAM
+        elif state == STATE_RED or state == STATE_TRAM:
+            if i < active_leds: is_lit = True
         
         # LOGIK FÜR CLEARANCE
         elif state == STATE_CLEARANCE:
             is_lit = True
-            current_color = COLOR_CLEARANCE
 
         # --- ZEICHNEN ---
         
         if is_lit:
-            # Surface erstellen für Alpha-Transparenz und Größe
-            # Wenn Slow Mode aktiv ist (state == STATE_GREEN und is_slow_mode), 
-            # dann atmen ALLE aktiven Punkte.
-            # Ebenso bei Clearance.
-            # Bei normalem Grün (ohne Slow Mode) sind sie statisch.
-            
-            use_breathing = False
-            use_pulsing_size = False
-            
-            if state == STATE_GREEN and is_slow_mode:
-                use_breathing = True
-                use_pulsing_size = True
-            elif state == STATE_CLEARANCE:
-                use_breathing = True
-                # Bei Clearance keine Größenänderung im original Code, kann aber auch aktiviert werden
-            
-            final_size = pulsing_size if use_pulsing_size else current_dot_size
-            surf_size_local = (final_size * 2) + 10
-            center_offset_local = surf_size_local // 2
-            
-            if use_breathing:
-                dot_surf = pygame.Surface((surf_size_local, surf_size_local), pygame.SRCALPHA)
-                pygame.draw.circle(dot_surf, current_color, (center_offset_local, center_offset_local), final_size)
+            if is_bonus and state == STATE_GREEN:
+                # BONUS PUNKTE: Atmen (Alpha & Größe)
+                dot_surf = pygame.Surface((surf_size, surf_size), pygame.SRCALPHA)
+                # Kreis mittig auf Surface zeichnen
+                pygame.draw.circle(dot_surf, COLOR_LED_ON, (center_offset, center_offset), pulsing_size)
                 dot_surf.set_alpha(breathing_alpha)
-                screen.blit(dot_surf, (x_int - center_offset_local, y_int - center_offset_local))
+                screen.blit(dot_surf, (x_int - center_offset, y_int - center_offset))
+                
+            elif state == STATE_CLEARANCE:
+                # CLEARANCE: Nur Alpha Blinken
+                dot_surf = pygame.Surface((surf_size, surf_size), pygame.SRCALPHA)
+                pygame.draw.circle(dot_surf, COLOR_CLEARANCE, (center_offset, center_offset), current_dot_size)
+                dot_surf.set_alpha(breathing_alpha)
+                screen.blit(dot_surf, (x_int - center_offset, y_int - center_offset))
+                
             else:
-                # NORMALE PUNKTE: Statisch, Weiß, Hart
-                gfxdraw.filled_circle(screen, x_int, y_int, current_dot_size, current_color)
-                gfxdraw.aacircle(screen, x_int, y_int, current_dot_size, current_color)
+                # NORMALE PUNKTE: Statisch Weiß
+                gfxdraw.filled_circle(screen, x_int, y_int, current_dot_size, COLOR_LED_ON)
+                gfxdraw.aacircle(screen, x_int, y_int, current_dot_size, COLOR_LED_ON)
         else:
             # INAKTIVE PUNKTE: Immer sichtbar in Dunkelgrau (Hintergrund)
             gfxdraw.filled_circle(screen, x_int, y_int, current_dot_size, COLOR_LED_OFF)
@@ -254,13 +235,22 @@ def main():
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Traffic Light Control")
     
+    # ESP Initialisierung
+    esp = ESPController(port=ESP_PORT)
+    esp.connect()
+    last_esp_values = None
+    
+    # Logik Initialisierung
+    logic = TrafficLightLogic()
+
     clock = pygame.time.Clock()
     
     current_state = STATE_RED 
-    led_counter = 0
-    current_total_leds = TOTAL_LEDS_RED 
     
-    timer_accumulator = 0 
+    # Zeitvariablen
+    timer_state_elapsed = logic.get_first_green_time_ms() # Startwert für Auto=Grün
+    timer_total_duration = DURATION_RED_BASE_MS
+    
     clearance_start_time = 0
     tram_display_timer = 0
     person_count = 0 
@@ -288,10 +278,9 @@ def main():
                 if event.key == pygame.K_DOWN: 
                     person_count = max(0, person_count - 1)
 
-        # ZEIT-FAKTOR
+        # ZEIT-FAKTOR (Geschwindigkeit der Zeit)
         current_time_factor = 1.0 
         if current_state == STATE_GREEN:
-            # 
             if slow_walker_detected: current_time_factor = TIME_FACTOR_SLOW
         elif current_state == STATE_RED:
             current_time_factor = 1.0 + ((person_count / 5) * CROWD_BONUS_FACTOR)
@@ -314,42 +303,61 @@ def main():
         if current_state == STATE_TRAM:
             if now - tram_display_timer > 2000:
                 current_state = STATE_RED 
-                current_total_leds = TOTAL_LEDS_RED 
-                led_counter = 0
+                timer_state_elapsed = 0
+                timer_total_duration = DURATION_RED_BASE_MS
 
         elif current_state == STATE_CLEARANCE:
             if now - clearance_start_time > CLEARANCE_TIME_MS:
                 current_state = STATE_RED
-                current_total_leds = TOTAL_LEDS_RED 
-                led_counter = 0
+                timer_state_elapsed = 0
+                timer_total_duration = DURATION_RED_BASE_MS
                 person_count = 0 
                 debug_log("Reset: Personenanzahl auf 0.")
 
         else:
-            timer_accumulator += dt * current_time_factor
-            time_threshold = MS_PER_LED_GREEN if current_state == STATE_GREEN else MS_PER_LED_RED
+            # Zeitfortschritt
+            timer_state_elapsed += dt * current_time_factor
             
-            if timer_accumulator >= time_threshold:
-                timer_accumulator -= time_threshold
-                
+            # Zustandswechsel prüfen
+            if timer_state_elapsed >= timer_total_duration:
                 if current_state == STATE_GREEN:
-                    led_counter -= 1
-                    if led_counter < 0:
-                        current_state = STATE_CLEARANCE
-                        clearance_start_time = now
-                        led_counter = 0
-                        timer_accumulator = 0
+                    current_state = STATE_CLEARANCE
+                    clearance_start_time = now
+                    timer_state_elapsed = 0
                 
                 elif current_state == STATE_RED:
-                    led_counter += 1
-                    if led_counter > TOTAL_LEDS_RED:
-                        current_state = STATE_GREEN
-                        bonus_leds = person_count * ADD_LEDS_PER_PERSON
-                        total_green = BASE_LEDS_GREEN + bonus_leds
-                        if total_green > MAX_LEDS_LIMIT: total_green = MAX_LEDS_LIMIT
-                        current_total_leds = total_green
-                        led_counter = total_green
-                        timer_accumulator = 0
+                    current_state = STATE_GREEN
+                    # Berechne Dauer der neuen Grünphase: Basis + Bonus
+                    bonus_time = person_count * BONUS_TIME_PER_PERSON_MS
+                    timer_total_duration = DURATION_GREEN_BASE_MS + bonus_time
+                    timer_state_elapsed = 0
+
+        # Berechnungen für Visualisierung LEDS
+        # Mapping von Zeit -> Anzahl LEDs (VISUAL_LED_COUNT)
+        active_leds_visual = 0
+        if current_state == STATE_RED:
+             ratio = timer_state_elapsed / timer_total_duration
+             if ratio > 1: ratio = 1
+             active_leds_visual = int(ratio * VISUAL_LED_COUNT)
+             
+        elif current_state == STATE_GREEN:
+             ratio = timer_state_elapsed / timer_total_duration
+             if ratio > 1: ratio = 1
+             # Grün zählt runter
+             remaining_ratio = 1.0 - ratio
+             active_leds_visual = int(remaining_ratio * VISUAL_LED_COUNT)
+
+        # ESP Update Logik (getrennt in traffic_logic.py)
+        # Berechne Soll-Zustand aller Lampen
+        lights = logic.calculate_lights(current_state, timer_state_elapsed, timer_total_duration)
+        
+        # Sende nur bei Änderung
+        current_values = (lights["main_red"], lights["main_green"], 
+                          lights["car_red"], lights["car_yellow"], lights["car_green"])
+                          
+        if current_values != last_esp_values:
+            esp.update_leds(*current_values)
+            last_esp_values = current_values
 
         # ZEICHNEN
         screen.fill((0,0,0)) 
@@ -371,27 +379,24 @@ def main():
         if current_state == STATE_TRAM:
             tram_rect = images['tram'].get_rect(center=pos_tram)
             screen.blit(images['tram'], tram_rect)
-            draw_led_ring(screen, TOTAL_LEDS_RED, TOTAL_LEDS_RED, STATE_TRAM, 255)
+            draw_led_ring(screen, VISUAL_LED_COUNT, VISUAL_LED_COUNT, STATE_TRAM, 255)
 
         elif current_state == STATE_CLEARANCE:
-            draw_led_ring(screen, current_total_leds, current_total_leds, STATE_CLEARANCE, clearance_alpha)
+            draw_led_ring(screen, VISUAL_LED_COUNT, VISUAL_LED_COUNT, STATE_CLEARANCE, clearance_alpha)
             time_left = CLEARANCE_TIME_MS - (now - clearance_start_time)
             draw_countdown_timer(screen, time_left)
 
         elif current_state == STATE_GREEN:
-            # Wenn Slow Mode (Leertaste) aktiv ist, zeichne die blinkende Schnecke
-            if slow_walker_detected:
-                draw_snail(screen, breath_alpha)
-            
-            # Ring zeichnen (Wenn slow_walker_detected, dann blinken ALLE aktiven Punkte)
-            draw_led_ring(screen, led_counter, current_total_leds, STATE_GREEN, breath_alpha, is_slow_mode=slow_walker_detected, pulse_factor=pulse)
+            # Ring zeichnen 
+            draw_led_ring(screen, active_leds_visual, VISUAL_LED_COUNT, STATE_GREEN, breath_alpha, is_slow_mode=slow_walker_detected, pulse_factor=pulse)
             
         else: # STATE_RED
             draw_crowd_image(screen, person_count)
-            draw_led_ring(screen, led_counter, TOTAL_LEDS_RED, STATE_RED, 255)
+            draw_led_ring(screen, active_leds_visual, VISUAL_LED_COUNT, STATE_RED, 255)
 
         pygame.display.flip() 
 
+    esp.close()
     pygame.quit()
     sys.exit()
 
