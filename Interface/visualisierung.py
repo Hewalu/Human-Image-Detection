@@ -436,12 +436,19 @@ def main():
         elif current_state == STATE_TRAM:
             c_red, c_yellow, c_green = 1, 0, 0
 
-        # Update senden
+        # Update senden / Empfangen
         if ESP_AVAILABLE and esp:
+            # 1. Bildschirminhalt an ESP senden (Licht)
             current_values = (p_red, p_green, c_red, c_yellow, c_green)
             if current_values != last_esp_values:
                 esp.update_leds(*current_values)
                 last_esp_values = current_values
+
+            # 2. Sensordaten empfangen (Personenanzahl)
+            sensor_count = esp.read_sensor_data()
+            if sensor_count is not None:
+                # Sensor überschreibt manuelle Steuerung
+                person_count = min(MAX_PERSON_CAP, sensor_count)
 
         # ==========================================
         # BILDSCHIRM AUSGABE
