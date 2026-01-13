@@ -290,6 +290,8 @@ def main():
                     current_state = STATE_RED
                     timer_elapsed = 0
                     timer_total_duration_red = DURATION_RED_BASE_MS
+                    if esp:
+                        esp.set_pulsing(True)
 
                 if event.key == pygame.K_t:
                     current_state = STATE_TRAM
@@ -318,6 +320,27 @@ def main():
         # ==========================================
         # ZUSTANDS LOGIK & TIMER
         # ==========================================
+
+        # Check external Button (ESP)
+        if esp:
+            if esp.button_pressed:
+                esp.button_pressed = False
+                if current_state == STATE_IDLE:
+                    debug_log("ESP Button 1! Starte Rotphase.")
+                    current_state = STATE_RED
+                    timer_elapsed = 0
+                    timer_total_duration_red = DURATION_RED_BASE_MS
+                    esp.set_pulsing(True)
+
+            if esp.button2_pressed:
+                esp.button2_pressed = False
+                # Toggle Slow Mode
+                if current_state == STATE_GREEN:  # Nur während GRÜN relevant? Oder allgemein togglen?
+                    # Anforderung: slow mode aktivieren. Interpretieren wir als Toggle.
+                    # User Request sagt: "Der andere Button ist um den slow mode zu aktivieren"
+                    # Ich mache es wie bei LEERTASTE:
+                    slow_mode_active = not slow_mode_active
+                    debug_log(f"ESP Button 2! Slow Mode: {slow_mode_active}")
 
         if current_state == STATE_IDLE:
             pass
@@ -388,6 +411,8 @@ def main():
                 timer_elapsed = 0
                 person_count = 0
                 slow_mode_active = False
+                if esp:
+                    esp.set_pulsing(False)
                 debug_log("Zyklus beendet.")
 
         # ==========================================

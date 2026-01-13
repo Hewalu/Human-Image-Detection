@@ -10,6 +10,8 @@ class ESPController:
         self.ser = None
         self.connected = False
         self.sensor_values = [0] * 8  # Status der 8 Sensoren
+        self.button_pressed = False
+        self.button2_pressed = False
 
     def connect(self):
         """Verbindet mit dem ESP32 über Serial."""
@@ -43,14 +45,25 @@ class ESPController:
         cmd = f"L {' '.join(map(str, vals))}"
         self.send_command(cmd)
 
+    def set_pulsing(self, active):
+        """Sendet Befehl zum Pulsieren der LED (Button-Feedback)."""
+        val = 1 if active else 0
+        self.send_command(f"P {val}")
+
     def read_sensor_data(self):
-        """Liest Daten vom ESP, falls verfügbar. Gibt die Anzahl Personen zurück oder None."""
+        """Liest Daten vom ESP, falls verfügbar. Gibt die Anzahl Personen zurück oder None.
+           Setzt self.button_pressed = True wenn Button gedrückt wurde."""
         if not self.connected or not self.ser:
             return None
 
+        last_count = None
         try:
-            if self.ser.in_waiting > 0:
+            # Lese alle verfügbaren Zeilen, um "B 1" nicht zu verpassen wenn "S ..." auch da ist
+            while self.ser.in_waiting > 0:
                 line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+
+                if not line:
+                    continue
 
                 # Format: S <s1> ... <s8>
                 if line.startswith("S"):
@@ -59,18 +72,31 @@ class ESPController:
                         vals = [int(p) for p in parts[1:9]]
                         self.sensor_values = vals
                         # Nur die ersten 6 Sensoren (Ampeln) zählen zur Personenanzahl
-                        # Die letzten 2 (Bahnhof) werden ignoriert für den Count
-                        return sum(vals[:6])
+                        last_count = sum(vals[:6])
 
-                # Fallback Format: P <count>
-                if line.startswith("P"):
+                # Format: B 1 -> Button pressed
+                elif line.startswith("B"):
                     parts = line.split()
                     if len(parts) >= 2:
-                        return int(parts[1])
+                        val = parts[1]
+                        if val == "1":
+                            self.button_pressed = True
+                        elif val == "2":
+                            self.button2_pressed = True
+
+                # Fallback Format: P <count>
+                elif line.startswith("P") and not line.startswith("P "):  # P <val> könnte auch Pulse sein, wir lesen hier nur Output vom ESP
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            last_count = int(parts[1])
+                        except:
+                            pass
         except Exception as e:
             # print(f"[ESP] Read Error: {e}")
             pass
-        return None
+
+        return last_count
 
     def set_red(self):
         # Legacy support, falls noch benötigt (setzt nur Hauptampel, Rest aus/default)
