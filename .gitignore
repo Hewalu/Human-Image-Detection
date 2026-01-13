@@ -1,3 +1,4 @@
 __pycache__/
 yolo11n.pt
 yolo11n-seg.pt
+.DS_Store
