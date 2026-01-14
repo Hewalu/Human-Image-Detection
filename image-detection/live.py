@@ -37,7 +37,7 @@ class SpeedEstimator:
 
     def update(self, results):
         current_time = time.time()
-        active_speeds = {}  # id -> {speed: float, category: str, box: [x1, y1, x2, y2]}
+        active_speeds = {}  # id -> {speed: float, category: str, direction: str, box: [x1, y1, x2, y2]}
 
         if not results or not results[0].boxes.id is not None:
             return active_speeds
@@ -55,7 +55,8 @@ class SpeedEstimator:
             if track_id not in self.tracks:
                 self.tracks[track_id] = {
                     'positions': [],
-                    'last_speed': 0.0
+                    'last_speed': 0.0,
+                    'last_direction': "UNKNOWN"
                 }
 
             # Add current position
@@ -65,8 +66,10 @@ class SpeedEstimator:
             # Cleanup old positions
             track_data['positions'] = [p for p in track_data['positions'] if current_time - p[0] < self.history_duration]
 
-            # Calculate speed
+            # Calculate speed and direction
             speed = 0.0
+            direction = track_data.get('last_direction', "UNKNOWN")
+            
             positions = track_data['positions']
             if len(positions) > 1:
                 # Compare current with oldest in history (within window) for stability
@@ -76,6 +79,19 @@ class SpeedEstimator:
 
                 if dt > 0.1:  # Only calculate if we have a little bit of time passed
                     dist_pixels = np.sqrt((cx - x0)**2 + (cy - y0)**2)
+                    
+                    # Direction Calculation (Y-axis movement)
+                    # Y increases downwards. 
+                    # cy > y0 -> Moving Down -> Incoming (Top of screen to Bottom)
+                    # cy < y0 -> Moving Up -> Outgoing (Bottom of screen to Top)
+                    # dy = cy - y0
+                    # if abs(dy) > 10: # Threshold to ignore jitter
+                    #     if dy > 0:
+                    #         direction = "INCOMING"
+                    #     else:
+                    #         direction = "OUTGOING"
+                    
+                    # track_data['last_direction'] = direction
 
                     # Estimate scale: Assume average person is 1.7m tall
                     # pixels_per_meter = height_in_pixels / 1.7
@@ -89,9 +105,30 @@ class SpeedEstimator:
                         speed = (self.speed_smooth_factor * raw_speed) + \
                                 ((1 - self.speed_smooth_factor) * track_data['last_speed'])
 
+            # Determine Direction based on Speed and Movement
+            if speed < 0.25:
+                # If speed is very low, assume waiting
+                direction = "WAITING"
+            else:
+                 # Only update direction if moving fast enough
+                 if direction == "WAITING":
+                     direction = "UNKNOWN" # Reset if started moving
+                 
+                 # Recalculate or use dy from above if available? 
+                 # To be clean, we should recalc dy here or use movement
+                 if len(positions) > 1:
+                     t0, x0, y0, h0 = positions[0]
+                     dy = cy - y0
+                     if abs(dy) > 10: 
+                        if dy > 0:
+                            direction = "INCOMING"
+                        else:
+                            direction = "OUTGOING"
+
+            track_data['last_direction'] = direction
             track_data['last_speed'] = speed
 
-            # Categorize
+            # Categorize Speed
             category = "LOW"
             if speed > 1.65:
                 category = "HIGH"
@@ -101,6 +138,7 @@ class SpeedEstimator:
             active_speeds[track_id] = {
                 'speed': speed,
                 'category': category,
+                'direction': direction,
                 'box': box
             }
 
@@ -212,7 +250,7 @@ class UIUtils:
         return w, h
 
     @staticmethod
-    def draw_hud_box(img, box, color, label=None, sublabel=None):
+    def draw_hud_box(img, box, color, label=None, sublabel=None, style="inward"):
         """Draws a tech/sci-fi style corner bracket box."""
         x1, y1, x2, y2 = map(int, box)
         w = x2 - x1
@@ -220,26 +258,46 @@ class UIUtils:
         line_len = min(w, h) // 4
         thickness = 2
 
-        # Corners
-        # Top-Left
-        cv2.line(img, (x1, y1), (x1 + line_len, y1), color, thickness)
-        cv2.line(img, (x1, y1), (x1, y1 + line_len), color, thickness)
-        # Top-Right
-        cv2.line(img, (x2, y1), (x2 - line_len, y1), color, thickness)
-        cv2.line(img, (x2, y1), (x2, y1 + line_len), color, thickness)
-        # Bottom-Left
-        cv2.line(img, (x1, y2), (x1 + line_len, y2), color, thickness)
-        cv2.line(img, (x1, y2), (x1, y2 - line_len), color, thickness)
-        # Bottom-Right
-        cv2.line(img, (x2, y2), (x2 - line_len, y2), color, thickness)
-        cv2.line(img, (x2, y2), (x2, y2 - line_len), color, thickness)
+        if style == "outward":
+            # Corners pointing OUTWARDS
+            # Top-Left
+            cv2.line(img, (x1, y1), (x1 - line_len, y1), color, thickness)
+            cv2.line(img, (x1, y1), (x1, y1 - line_len), color, thickness)
+            # Top-Right
+            cv2.line(img, (x2, y1), (x2 + line_len, y1), color, thickness)
+            cv2.line(img, (x2, y1), (x2, y1 - line_len), color, thickness)
+            # Bottom-Left
+            cv2.line(img, (x1, y2), (x1 - line_len, y2), color, thickness)
+            cv2.line(img, (x1, y2), (x1, y2 + line_len), color, thickness)
+            # Bottom-Right
+            cv2.line(img, (x2, y2), (x2 + line_len, y2), color, thickness)
+            cv2.line(img, (x2, y2), (x2, y2 + line_len), color, thickness)
+        else:
+            # Corners pointing INWARDS (Default)
+            # Top-Left
+            cv2.line(img, (x1, y1), (x1 + line_len, y1), color, thickness)
+            cv2.line(img, (x1, y1), (x1, y1 + line_len), color, thickness)
+            # Top-Right
+            cv2.line(img, (x2, y1), (x2 - line_len, y1), color, thickness)
+            cv2.line(img, (x2, y1), (x2, y1 + line_len), color, thickness)
+            # Bottom-Left
+            cv2.line(img, (x1, y2), (x1 + line_len, y2), color, thickness)
+            cv2.line(img, (x1, y2), (x1, y2 - line_len), color, thickness)
+            # Bottom-Right
+            cv2.line(img, (x2, y2), (x2 - line_len, y2), color, thickness)
+            cv2.line(img, (x2, y2), (x2, y2 - line_len), color, thickness)
 
         # Label with glass background
         if label:
-            UIUtils.draw_glass_panel(img, x1, y1 - 35, 140, 30, color=(0, 0, 0), alpha=0.6)
-            cv2.putText(img, label, (x1 + 10, y1 - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, Colors.TEXT_WHITE, 1, cv2.LINE_AA)
+            # Adjust label width based on content
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            (lw, lh), _ = cv2.getTextSize(label, font, 0.6, 1)
+            panel_w = max(140, lw + 20)
+            
+            UIUtils.draw_glass_panel(img, x1, y1 - 35, panel_w, 30, color=(0, 0, 0), alpha=0.6)
+            cv2.putText(img, label, (x1 + 10, y1 - 12), font, 0.6, Colors.TEXT_WHITE, 1, cv2.LINE_AA)
             if sublabel:
-                cv2.putText(img, sublabel, (x1 + 10, y1 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, Colors.TEXT_GRAY, 1, cv2.LINE_AA)
+                cv2.putText(img, sublabel, (x1 + 10, y1 + 15), font, 0.4, Colors.TEXT_GRAY, 1, cv2.LINE_AA)
 
 
 def draw_interface(frame, person_count, width=1920, height=1080):
@@ -438,6 +496,7 @@ def main(args):
         for track_id, data in speeds.items():
             speed = data['speed']
             category = data['category']
+            direction = data.get('direction', 'UNKNOWN')
             box = data['box']
             x1, y1, x2, y2 = map(int, box)
 
@@ -448,9 +507,23 @@ def main(args):
                 color = Colors.ACCENT_ORANGE
             else:  # LOW
                 color = Colors.ACCENT_GREEN
+            
+            # Determine Label and Style
+            dir_label = ""
+            style = "inward"
+            
+            if direction == "INCOMING":
+                dir_label = "| HIN"
+                style = "outward" # Corners point out
+            elif direction == "OUTGOING":
+                dir_label = "| WEG"
+                style = "inward" # Corners point in
+            elif direction == "WAITING":
+                dir_label = "| WARTET"
+                style = "inward" # Corners point in
 
-            label = f"{speed:.1f} m/s"
-            UIUtils.draw_hud_box(annotated_frame, box, color, label, category)
+            label = f"{speed:.1f} m/s {dir_label}"
+            UIUtils.draw_hud_box(annotated_frame, box, color, label, category, style=style)
 
         # Zähle Personen (Rohdaten)
         raw_count = len(results[0].boxes)
