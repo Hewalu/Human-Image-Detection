@@ -343,7 +343,14 @@ def main():
                     debug_log(f"ESP Button 2! Slow Mode: {slow_mode_active}")
 
         if current_state == STATE_IDLE:
-            pass
+            # Automatische Auslösung, wenn Personen erkannt werden
+            if person_count > 0:
+                debug_log("Person erkannt (Sensor)! Starte Rotphase.")
+                current_state = STATE_RED
+                timer_elapsed = 0
+                timer_total_duration_red = DURATION_RED_BASE_MS
+                if esp:
+                    esp.set_pulsing(True)
 
         elif current_state == STATE_TRAM:
             if now - tram_display_timer > 2000:
