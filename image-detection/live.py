@@ -1,10 +1,15 @@
 import argparse
 import cv2
 import time
+import os
 import numpy as np
 from ultralytics import YOLO
 
 # Konfiguration
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+MODEL_NAME = "yolo11n-seg.pt"
+
 DEBOUNCE_TIME = 0.25  # Reduziert auf 0.25 Sekunden
 
 
@@ -45,8 +50,9 @@ class SpeedEstimator:
         # Extract data from YOLO results
         track_ids = results[0].boxes.id.int().cpu().tolist()
         boxes = results[0].boxes.xyxy.cpu().tolist()
+        classes = results[0].boxes.cls.int().cpu().tolist()
 
-        for track_id, box in zip(track_ids, boxes):
+        for track_id, box, cls_id in zip(track_ids, boxes, classes):
             x1, y1, x2, y2 = box
             cx = (x1 + x2) / 2
             cy = (y1 + y2) / 2
@@ -69,7 +75,7 @@ class SpeedEstimator:
             # Calculate speed and direction
             speed = 0.0
             direction = track_data.get('last_direction', "UNKNOWN")
-            
+
             positions = track_data['positions']
             if len(positions) > 1:
                 # Compare current with oldest in history (within window) for stability
@@ -79,9 +85,9 @@ class SpeedEstimator:
 
                 if dt > 0.1:  # Only calculate if we have a little bit of time passed
                     dist_pixels = np.sqrt((cx - x0)**2 + (cy - y0)**2)
-                    
+
                     # Direction Calculation (Y-axis movement)
-                    # Y increases downwards. 
+                    # Y increases downwards.
                     # cy > y0 -> Moving Down -> Incoming (Top of screen to Bottom)
                     # cy < y0 -> Moving Up -> Outgoing (Bottom of screen to Top)
                     # dy = cy - y0
@@ -90,7 +96,7 @@ class SpeedEstimator:
                     #         direction = "INCOMING"
                     #     else:
                     #         direction = "OUTGOING"
-                    
+
                     # track_data['last_direction'] = direction
 
                     # Estimate scale: Assume average person is 1.7m tall
@@ -110,16 +116,16 @@ class SpeedEstimator:
                 # If speed is very low, assume waiting
                 direction = "WAITING"
             else:
-                 # Only update direction if moving fast enough
-                 if direction == "WAITING":
-                     direction = "UNKNOWN" # Reset if started moving
-                 
-                 # Recalculate or use dy from above if available? 
-                 # To be clean, we should recalc dy here or use movement
-                 if len(positions) > 1:
-                     t0, x0, y0, h0 = positions[0]
-                     dy = cy - y0
-                     if abs(dy) > 10: 
+                # Only update direction if moving fast enough
+                if direction == "WAITING":
+                    direction = "UNKNOWN"  # Reset if started moving
+
+                # Recalculate or use dy from above if available?
+                # To be clean, we should recalc dy here or use movement
+                if len(positions) > 1:
+                    t0, x0, y0, h0 = positions[0]
+                    dy = cy - y0
+                    if abs(dy) > 10:
                         if dy > 0:
                             direction = "INCOMING"
                         else:
@@ -139,7 +145,8 @@ class SpeedEstimator:
                 'speed': speed,
                 'category': category,
                 'direction': direction,
-                'box': box
+                'box': box,
+                'class_id': cls_id
             }
 
         return active_speeds
@@ -293,7 +300,7 @@ class UIUtils:
             font = cv2.FONT_HERSHEY_SIMPLEX
             (lw, lh), _ = cv2.getTextSize(label, font, 0.6, 1)
             panel_w = max(140, lw + 20)
-            
+
             UIUtils.draw_glass_panel(img, x1, y1 - 35, panel_w, 30, color=(0, 0, 0), alpha=0.6)
             cv2.putText(img, label, (x1 + 10, y1 - 12), font, 0.6, Colors.TEXT_WHITE, 1, cv2.LINE_AA)
             if sublabel:
@@ -380,9 +387,10 @@ def main(args):
     fallback_local_source = available_cams[0] if available_cams else None
 
     # Lade das YOLOv11 Nano Segmentation Modell
-    print("Lade Modell (YOLOv11n-seg)...")
+    print(f"Lade Modell ({MODEL_NAME})...")
     try:
-        model = YOLO("yolo11n-seg.pt")
+        model_path = os.path.join(MODELS_DIR, MODEL_NAME)
+        model = YOLO(model_path)
     except Exception as e:
         print(f"Fehler beim Laden des Modells: {e}")
         return
@@ -453,7 +461,7 @@ def main(args):
 
         # Führe YOLO Tracking auf dem Frame aus (aktiviere Masken)
         # Hinweis: retina_masks=True sorgt für bessere Maskenqualität, ist aber etwas langsamer.
-        results = model.track(frame, classes=[0], persist=True, verbose=False, retina_masks=True)
+        results = model.track(frame, classes=[0, 2], persist=True, verbose=False, retina_masks=True)
 
         # Clone frame for clean drawing
         annotated_frame = frame.copy()
@@ -498,35 +506,47 @@ def main(args):
             category = data['category']
             direction = data.get('direction', 'UNKNOWN')
             box = data['box']
+            cls_id = data.get('class_id', 0)
             x1, y1, x2, y2 = map(int, box)
 
-            # Farbe je nach Kategorie
-            if category == "HIGH":
-                color = Colors.ACCENT_RED
-            elif category == "MEDIUM":
-                color = Colors.ACCENT_ORANGE
-            else:  # LOW
-                color = Colors.ACCENT_GREEN
-            
-            # Determine Label and Style
-            dir_label = ""
-            style = "inward"
-            
-            if direction == "INCOMING":
-                dir_label = "| HIN"
-                style = "outward" # Corners point out
-            elif direction == "OUTGOING":
-                dir_label = "| WEG"
-                style = "inward" # Corners point in
-            elif direction == "WAITING":
-                dir_label = "| WARTET"
-                style = "inward" # Corners point in
+            if cls_id == 2:  # Car / Auto
+                # Nur fahrende Autos markieren: speed > 0.5 (als Schwellenwert)
+                if speed > 0.5:
+                    color = Colors.ACCENT_RED
+                    label = "Auto"
+                    sublabel = f"{speed:.1f} m/s"
+                    UIUtils.draw_hud_box(annotated_frame, box, color, label, sublabel, style="outward")
+            else:
+                # Person logic
+                # Farbe je nach Kategorie
+                if category == "HIGH":
+                    color = Colors.ACCENT_RED
+                elif category == "MEDIUM":
+                    color = Colors.ACCENT_ORANGE
+                else:  # LOW
+                    color = Colors.ACCENT_GREEN
 
-            label = f"{speed:.1f} m/s {dir_label}"
-            UIUtils.draw_hud_box(annotated_frame, box, color, label, category, style=style)
+                # Determine Label and Style
+                dir_label = ""
+                style = "inward"
+
+                if direction == "INCOMING":
+                    dir_label = "| HIN"
+                    style = "outward"  # Corners point out
+                elif direction == "OUTGOING":
+                    dir_label = "| WEG"
+                    style = "inward"  # Corners point in
+                elif direction == "WAITING":
+                    dir_label = "| WARTET"
+                    style = "inward"  # Corners point in
+
+                label = f"{speed:.1f} m/s {dir_label}"
+                UIUtils.draw_hud_box(annotated_frame, box, color, label, category, style=style)
 
         # Zähle Personen (Rohdaten)
-        raw_count = len(results[0].boxes)
+        # Nur Personen zählen (class 0)
+        boxes_cls = results[0].boxes.cls.int().cpu().tolist()
+        raw_count = boxes_cls.count(0)
 
         # Glätte den Wert (Debouncing)
         smooth_count = smoother.update(raw_count)
