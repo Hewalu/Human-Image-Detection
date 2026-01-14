@@ -50,18 +50,18 @@ CROWD_BONUS_FACTOR = 0.2
 # 2. LED SETUP
 # Wir nutzen 21 Punkte für Grün.
 BASE_LEDS_GREEN = 21
-VISUAL_LED_COUNT = 30
-TOTAL_LEDS_RED = 30
+VISUAL_LED_COUNT = 25
+TOTAL_LEDS_RED = 25
 MAX_LEDS_LIMIT = 30
 
 # 3. GESCHWINDIGKEITEN
-SECONDS_PER_LED_RED = 0.86   # Wartezeit füllen
+SECONDS_PER_LED_RED = 1.0   # Wartezeit füllen
 SECONDS_PER_LED_GREEN = 0.333  # Normales Ablaufen
 SECONDS_PER_LED_GREEN_SLOW = 0.5    # Langsames Ablaufen (Taste)
 
 # 4. FESTE PHASEN (in Millisekunden)
 TIME_SAFETY_PRE_GREEN = 4000  # Puffer bevor Fußgänger Grün bekommen (Alle Rot)
-TIME_CLEARANCE = 6000  # Räumzeit am Ende
+TIME_CLEARANCE = 10000  # Räumzeit am Ende
 TIME_CAR_YELLOW = 3000  # Wie lange Autos Gelb haben vor Rot
 TIME_CAR_RED_YELLOW = 1500  # Wie lange Autos Rot-Gelb haben vor Grün
 
@@ -289,7 +289,7 @@ def main():
                     debug_log("Knopf gedrückt! Starte Rotphase.")
                     current_state = STATE_RED
                     timer_elapsed = 0
-                    timer_total_duration_red = DURATION_RED_BASE_MS
+                    timer_total_duration_red = DURATION_RED_BASE_MS + TIME_SAFETY_PRE_GREEN
                     if esp:
                         esp.set_pulsing(True)
 
@@ -329,7 +329,7 @@ def main():
                     debug_log("ESP Button 1! Starte Rotphase.")
                     current_state = STATE_RED
                     timer_elapsed = 0
-                    timer_total_duration_red = DURATION_RED_BASE_MS
+                    timer_total_duration_red = DURATION_RED_BASE_MS + TIME_SAFETY_PRE_GREEN
                     esp.set_pulsing(True)
 
             if esp.button2_pressed:
@@ -357,7 +357,7 @@ def main():
                 debug_log("Person erkannt (Sensor)! Starte Rotphase.")
                 current_state = STATE_RED
                 timer_elapsed = 0
-                timer_total_duration_red = DURATION_RED_BASE_MS
+                timer_total_duration_red = DURATION_RED_BASE_MS + TIME_SAFETY_PRE_GREEN
                 if esp:
                     esp.set_pulsing(True)
 
@@ -377,9 +377,9 @@ def main():
             visual_active_leds = int(ratio * VISUAL_LED_COUNT)
 
             if timer_elapsed >= timer_total_duration_red:
-                # Wechsel zu SAFETY_1 (Puffer)
-                current_state = STATE_SAFETY_1
-                timer_elapsed = 0  # Timer Reset für Safety Phase
+                # Wechsel direkt zu GRÜN (Safety ist jetzt logisch Teil der Rot-Dauer)
+                current_state = STATE_GREEN
+                timer_elapsed = 0
 
                 # GRÜN TANK Vorbereiten
                 bonus_leds = person_count * ADD_LEDS_PER_PERSON
@@ -443,11 +443,14 @@ def main():
             pass
 
         elif current_state == STATE_RED:
-            # Auto fährt noch, ABER am Ende Gelb -> Rot
+            # Auto fährt noch, ABER am Ende Gelb -> Rot -> Safety Rot
             time_left = timer_total_duration_red - timer_elapsed
-            # Gelb-Phase startet bei TIME_CAR_YELLOW vor Ende
-            if time_left < TIME_CAR_YELLOW:
-                # Ist es noch Gelb oder schon Rot (für Millisekunden)?
+
+            # Die letzten 4s (TIME_SAFETY_PRE_GREEN) sind Safety-Rot (Autos Rot)
+            if time_left <= TIME_SAFETY_PRE_GREEN:
+                c_red, c_yellow, c_green = 1, 0, 0
+            # Davor TIME_CAR_YELLOW lang Gelb
+            elif time_left <= (TIME_SAFETY_PRE_GREEN + TIME_CAR_YELLOW):
                 c_red, c_yellow, c_green = 0, 1, 0  # Gelb
             else:
                 c_red, c_yellow, c_green = 0, 0, 1  # Grün
